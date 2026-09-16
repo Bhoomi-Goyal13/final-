@@ -1,0 +1,109 @@
+import pickle
+import re
+
+import nltk
+import numpy as np
+import streamlit as st
+from nltk.corpus import stopwords
+from tensorflow.keras.models import load_model
+from tensorflow.keras.preprocessing.sequence import pad_sequences
+
+# --------------------------------------------------------------------------
+# Config — must match the values used in the training notebook
+# --------------------------------------------------------------------------
+MAXLEN = 200
+MODEL_PATH = "sentiment_lstm.h5"
+TOKENIZER_PATH = "tokenizer.pkl"
+
+st.set_page_config(page_title="Movie Review Sentiment Analyzer", page_icon="🎬")
+
+
+# --------------------------------------------------------------------------
+# Cached resource loading — runs once per session, not on every rerun
+# --------------------------------------------------------------------------
+@st.cache_resource
+def load_stopwords():
+    try:
+        return set(stopwords.words("english"))
+    except LookupError:
+        nltk.download("stopwords")
+        return set(stopwords.words("english"))
+
+
+@st.cache_resource
+def load_artifacts():
+    model = load_model(MODEL_PATH)
+    with open(TOKENIZER_PATH, "rb") as f:
+        tokenizer = pickle.load(f)
+    return model, tokenizer
+
+
+# --------------------------------------------------------------------------
+# Preprocessing — mirrors the cleaning steps applied to the training data
+# (lowercase + English stopword removal) so the tokenizer sees text in the
+# same shape it was fit on
+# --------------------------------------------------------------------------
+def clean_text(text: str, stop_words: set) -> str:
+    text = text.lower()
+    text = re.sub(r"<.*?>", " ", text)          # strip HTML tags like <br />
+    text = re.sub(r"http\S+", " ", text)         # strip URLs
+    text = re.sub(r"[^a-z0-9\s]", " ", text)     # strip punctuation
+    words = [w for w in text.split() if w not in stop_words]
+    return " ".join(words)
+
+
+def predict_sentiment(text: str, model, tokenizer, stop_words: set):
+    cleaned = clean_text(text, stop_words)
+    seq = tokenizer.texts_to_sequences([cleaned])
+    padded = pad_sequences(seq, maxlen=MAXLEN)
+    prob = float(model.predict(padded, verbose=0)[0][0])
+    label = "Positive 😀" if prob >= 0.5 else "Negative 😞"
+    confidence = prob if prob >= 0.5 else 1 - prob
+    return label, confidence, prob
+
+
+# --------------------------------------------------------------------------
+# UI
+# --------------------------------------------------------------------------
+st.title("🎬 Movie Review Sentiment Analyzer")
+st.write(
+    "Enter a movie review below and the LSTM model trained on the IMDB "
+    "dataset will predict whether the sentiment is positive or negative."
+)
+
+stop_words = load_stopwords()
+
+try:
+    model, tokenizer = load_artifacts()
+except Exception as e:
+    st.error(
+        "Couldn't load the model or tokenizer. Make sure "
+        f"'{MODEL_PATH}' and '{TOKENIZER_PATH}' are in the same folder "
+        "as this app (and were committed to your GitHub repo)."
+    )
+    st.exception(e)
+    st.stop()
+
+review_text = st.text_area(
+    "Movie review",
+    height=180,
+    placeholder="Type or paste a movie review here...",
+)
+
+if st.button("Analyze Sentiment", type="primary"):
+    if not review_text.strip():
+        st.warning("Please enter a review first.")
+    else:
+        with st.spinner("Analyzing..."):
+            label, confidence, prob = predict_sentiment(
+                review_text, model, tokenizer, stop_words
+            )
+
+        st.subheader(f"Prediction: {label}")
+        st.write(f"Confidence: **{confidence * 100:.1f}%**")
+        st.progress(prob)
+        with st.expander("Raw model output"):
+            st.write(f"Sigmoid probability (positive): {prob:.4f}")
+
+st.markdown("---")
+st.caption("Model: Embedding → LSTM → Dense (sigmoid), trained on the IMDB Dataset.")
